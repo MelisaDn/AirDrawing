@@ -30,15 +30,27 @@ DRAW_START_DELAY = 5
 
 
 
+def distance(p1, p2):
+    return ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2) ** 0.5
+
+
+def isFingerExtended(lm, tip_id, pip_id, mcp_id):
+    tip_to_wrist = distance(lm[tip_id], lm[0])
+    pip_to_wrist = distance(lm[pip_id], lm[0])
+    mcp_to_wrist = distance(lm[mcp_id], lm[0])
+
+    return tip_to_wrist > pip_to_wrist and tip_to_wrist > mcp_to_wrist
+
+
 def isOnlyIndexFingerUp(hand_landmarks):
     lm = hand_landmarks.landmark
 
-    index_up = lm[8].y < lm[6].y
-    middle_down = lm[12].y > lm[10].y
-    ring_down = lm[16].y > lm[14].y
-    pinky_down = lm[20].y > lm[18].y
+    index_extended = isFingerExtended(lm, 8, 6, 5)
+    middle_extended = isFingerExtended(lm, 12, 10, 9)
+    ring_extended = isFingerExtended(lm, 16, 14, 13)
+    pinky_extended = isFingerExtended(lm, 20, 18, 17)
 
-    return index_up and middle_down and ring_down and pinky_down
+    return index_extended and not middle_extended and not ring_extended and not pinky_extended
 
 
 def isPeaceSign(hand_landmarks):
@@ -78,6 +90,7 @@ while True:
         break
 
     frame = cv2.flip(frame, 1)
+    frame = cv2.GaussianBlur(frame, (5, 5), 0)
     h, w, _ = frame.shape
 
     if canvas is None:

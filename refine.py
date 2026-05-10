@@ -20,7 +20,6 @@ hands = mp_hands.Hands(
 )
 
 canvas = None
-canvas_history = []
 prev_x, prev_y = None, None
 draw_counter = 0
 brush_color = (255, 0, 0)  # blue
@@ -99,21 +98,6 @@ def calculateAngle(p1, p2, p3):
 
     return angle
 
-def isClosedStroke(trajectory_points, threshold=60):
-    if len(trajectory_points) < 2:
-        return False
-
-    start = np.array(trajectory_points[0])
-    end = np.array(trajectory_points[-1])
-
-    distance = np.linalg.norm(start - end)
-
-    pts = np.array(trajectory_points, dtype=np.int32)
-    x, y, w, h = cv2.boundingRect(pts)
-    bbox_diagonal = np.sqrt(w ** 2 + h ** 2)
-
-    return distance < threshold or distance < 0.25 * bbox_diagonal
-
 
 def isRectangleLike(approx):
     if len(approx) != 4:
@@ -137,230 +121,186 @@ def removeRoughShape(canvas, trajectory_points, thickness):
     mask = np.zeros(canvas.shape[:2], dtype=np.uint8)
     pts = np.array(trajectory_points, dtype=np.int32)
 
-    cv2.polylines(mask, [pts], False, 255, thickness + 4)
+    cv2.polylines(mask, [pts], False, 255, thickness + 12)
 
     kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=0)
+    mask = cv2.dilate(mask, kernel, iterations=1)
 
     canvas[mask == 255] = 0
     return canvas
 
-def refineShape(canvas, trajectory_points, color, thickness):
+def resamplePoints(points, n=100):
+    """Resample trajectory to n evenly spaced points for consistent analysis."""
+    if len(points) < 2:
+        return points
+    pts = np.array(points, dtype=np.float32)
+    dists = np.sqrt(np.sum(np.diff(pts, axis=0)**2, axis=1))
+    cumlen = np.concatenate([[0], np.cumsum(dists)])
+    total = cumlen[-1]
+    if total == 0:
+        return points
+    target = np.linspace(0, total, n)
+    xs = np.interp(target, cumlen, pts[:, 0])
+    ys = np.interp(target, cumlen, pts[:, 1])
+    return list(zip(xs.astype(int), ys.astype(int)))
 
+
+def isClosedShape(trajectory_points, threshold=0.2):
+    """Check if start and end points are close relative to shape size."""
+    if len(trajectory_points) < 10:
+        return False
+    start = np.array(trajectory_points[0])
+    end   = np.array(trajectory_points[-1])
+    pts   = np.array(trajectory_points)
+    bbox_diag = np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))
+    if bbox_diag == 0:
+        return False
+    return np.linalg.norm(end - start) / bbox_diag < threshold
+
+
+def refineShape(canvas, trajectory_points, color, thickness):
     if len(trajectory_points) < 15:
         print("Not enough points")
         return canvas
 
-    pts = np.array(trajectory_points, dtype=np.int32)
+    # --- 1. Resample for consistent analysis ---
+    sampled = resamplePoints(trajectory_points, n=120)
+    pts_raw = np.array(trajectory_points, dtype=np.int32)
+    pts     = np.array(sampled, dtype=np.int32)
 
-    # Create binary image from trajectory
+    closed = isClosedShape(trajectory_points)
+
+    # --- 2. Build a clean binary mask from trajectory ---
     temp = np.zeros(canvas.shape[:2], dtype=np.uint8)
+    cv2.polylines(temp, [pts_raw], False, 255, thickness + 4)
+    kernel = np.ones((7, 7), np.uint8)
+    temp = cv2.morphologyEx(temp, cv2.MORPH_CLOSE, kernel)
 
-    cv2.polylines(
-        temp,
-        [pts],
-        False,
-        255,
-        thickness
-    )
-
-    # Morphological closing to connect gaps
-    kernel = np.ones((5, 5), np.uint8)
-
-    temp = cv2.morphologyEx(
-        temp,
-        cv2.MORPH_CLOSE,
-        kernel
-    )
-
-    # Edge detection
     edges = cv2.Canny(temp, 50, 150)
 
-    # -----------------------------
-    # 1. LINE DETECTION (HOUGH)
-    # -----------------------------
-    closed_stroke = isClosedStroke(trajectory_points)
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=10,
-        minLineLength=25,
-        maxLineGap=80
-    )
+    # -----------------------------------------------
+    # A. OPEN SHAPES  →  LINE  /  ARROW
+    # -----------------------------------------------
+    if not closed:
 
-    if lines is not None and not closed_stroke:
-        longest = max(
-            lines,
-            key=lambda l: np.linalg.norm(
-                (l[0][0] - l[0][2], l[0][1] - l[0][3])
-            )
+        lines = cv2.HoughLinesP(
+            edges, rho=1, theta=np.pi/180,
+            threshold=30, minLineLength=60, maxLineGap=30
         )
 
-        x1, y1, x2, y2 = longest[0]
+        if lines is not None:
+            longest = max(lines,
+                          key=lambda l: np.linalg.norm((l[0][0]-l[0][2],
+                                                        l[0][1]-l[0][3])))
+            x1, y1, x2, y2 = longest[0]
+            line_len     = np.linalg.norm((x1-x2, y1-y2))
+            contour_len  = cv2.arcLength(pts_raw, False)
 
-        line_length = np.linalg.norm((x1 - x2, y1 - y2))
+            if line_len > 0.55 * contour_len:
+                canvas = removeRoughShape(canvas, trajectory_points, thickness)
+                cv2.line(canvas, (x1, y1), (x2, y2), color, thickness)
+                print("Detected: LINE")
+                return canvas
 
-        x, y, w, h = cv2.boundingRect(pts)
+        print("No reliable open shape detected")
+        return canvas
 
-        bbox_diagonal = np.sqrt(w ** 2 + h ** 2)
+    # -----------------------------------------------
+    # B. CLOSED SHAPES  →  CIRCLE / ELLIPSE / POLYGON
+    # -----------------------------------------------
 
-        # More tolerant line rule
-        if line_length > 0.55 * bbox_diagonal:
-            canvas = removeRoughShape(canvas, trajectory_points, thickness)
-
-            cv2.line(canvas, (x1, y1), (x2, y2), color, thickness)
-
-            print("Detected: LINE")
-            return canvas
-
-    # -----------------------------
-    # CONTOUR DETECTION
-    # -----------------------------
-
-    contours, _ = cv2.findContours(
-        temp,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
+    contours, _ = cv2.findContours(temp, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        print("No contours")
+        print("No contours found")
         return canvas
 
     contour = max(contours, key=cv2.contourArea)
-
-    area = cv2.contourArea(contour)
+    area     = cv2.contourArea(contour)
 
     if area < 300:
-        print("Too small")
+        print("Shape too small")
         return canvas
 
     perimeter = cv2.arcLength(contour, True)
 
-    approx = cv2.approxPolyDP(
-        contour,
-        0.04 * perimeter,
-        True
-    )
+    # --- B1. CIRCLE check via circularity ---
+    circularity = (4 * np.pi * area) / (perimeter ** 2 + 1e-6)
 
-    # -----------------------------
-    # 2. TRIANGLE
-    # -----------------------------
+    if circularity > 0.72:
+        (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        canvas = removeRoughShape(canvas, trajectory_points, thickness)
+        cv2.circle(canvas, (int(cx), int(cy)), int(radius), color, thickness)
+        print(f"Detected: CIRCLE  (circularity={circularity:.2f})")
+        return canvas
 
-    if len(approx) == 3:
+    # --- B2. ELLIPSE check ---
+    if len(contour) >= 5:
+        ellipse = cv2.fitEllipse(contour)
+        (ex, ey), (major, minor), angle = ellipse
+        if minor > 0:
+            ellipse_ratio = major / minor
+            # Accept elongated ellipses but reject near-circles (already handled)
+            # and near-lines
+            if 1.3 < ellipse_ratio < 5.0:
+                # Verify fit quality: compare fitted ellipse area vs contour area
+                ellipse_area = np.pi * (major/2) * (minor/2)
+                fit_quality  = min(area, ellipse_area) / max(area, ellipse_area)
+                if fit_quality > 0.65:
+                    canvas = removeRoughShape(canvas, trajectory_points, thickness)
+                    cv2.ellipse(canvas, ellipse, color, thickness)
+                    print(f"Detected: ELLIPSE  (ratio={ellipse_ratio:.2f}, fit={fit_quality:.2f})")
+                    return canvas
 
-        canvas = removeRoughShape(
-            canvas,
-            trajectory_points,
-            thickness
-        )
+    # --- B3. POLYGON approximation ---
+    epsilon  = 0.03 * perimeter
+    approx   = cv2.approxPolyDP(contour, epsilon, True)
+    n_sides  = len(approx)
 
-        cv2.drawContours(
-            canvas,
-            [approx],
-            -1,
-            color,
-            thickness
-        )
+    # Retry with looser epsilon if we got too many sides
+    if n_sides > 6:
+        epsilon = 0.05 * perimeter
+        approx  = cv2.approxPolyDP(contour, epsilon, True)
+        n_sides = len(approx)
 
+    # Triangle
+    if n_sides == 3:
+        canvas = removeRoughShape(canvas, trajectory_points, thickness)
+        cv2.drawContours(canvas, [approx], -1, color, thickness)
         print("Detected: TRIANGLE")
         return canvas
 
-    # -----------------------------
-    # 3. RECTANGLE / SQUARE
-    # -----------------------------
+    # Rectangle / Square  — with angle quality check
+    if n_sides == 4:
+        rect  = cv2.minAreaRect(contour)
+        box   = np.int32(cv2.boxPoints(rect))
+        w_r, h_r = rect[1]
 
-    if len(approx) == 4:
+        if w_r > 0 and h_r > 0:
+            ratio      = max(w_r, h_r) / min(w_r, h_r)
+            shape_name = "SQUARE" if ratio < 1.25 else "RECTANGLE"
 
-        rect = cv2.minAreaRect(contour)
+            # Angle quality: all interior angles should be ≈90°
+            corners = [tuple(p[0]) for p in approx]
+            angles  = [
+                calculateAngle(corners[i-1], corners[i], corners[(i+1) % 4])
+                for i in range(4)
+            ]
+            if all(65 <= a <= 115 for a in angles):
+                canvas = removeRoughShape(canvas, trajectory_points, thickness)
+                cv2.drawContours(canvas, [box], 0, color, thickness)
+                print(f"Detected: {shape_name}  angles={[f'{a:.0f}' for a in angles]}")
+                return canvas
 
-        box = cv2.boxPoints(rect)
-
-        box = np.int32(box)
-
-        w_rect, h_rect = rect[1]
-
-        if w_rect == 0 or h_rect == 0:
-            return canvas
-
-        ratio = max(w_rect, h_rect) / min(w_rect, h_rect)
-
-        if ratio < 1.2:
-            shape_name = "SQUARE"
-        else:
-            shape_name = "RECTANGLE"
-
-        canvas = removeRoughShape(
-            canvas,
-            trajectory_points,
-            thickness
-        )
-
-        cv2.drawContours(
-            canvas,
-            [box],
-            0,
-            color,
-            thickness
-        )
-
-        print("Detected:", shape_name)
+    # Pentagon / Hexagon
+    if n_sides in (5, 6):
+        canvas = removeRoughShape(canvas, trajectory_points, thickness)
+        cv2.drawContours(canvas, [approx], -1, color, thickness)
+        print(f"Detected: {n_sides}-SIDED POLYGON")
         return canvas
 
-    # -----------------------------
-    # 4. CIRCLE (HOUGH)
-    # -----------------------------
-
-    circles = cv2.HoughCircles(
-        temp,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=50,
-        param1=100,
-        param2=25,
-        minRadius=20,
-        maxRadius=300
-    )
-
-    if circles is not None:
-
-        circles = np.uint16(np.around(circles))
-
-        c = circles[0][0]
-
-        center = (c[0], c[1])
-
-        radius = c[2]
-
-        canvas = removeRoughShape(
-            canvas,
-            trajectory_points,
-            thickness
-        )
-
-        cv2.circle(
-            canvas,
-            center,
-            radius,
-            color,
-            thickness
-        )
-
-        print("Detected: CIRCLE")
-        return canvas
-
-    print("No reliable shape detected")
-
+    print(f"No reliable shape detected  (sides={n_sides}, circularity={circularity:.2f})")
     return canvas
-
-
-def saveCanvasState(canvas, canvas_history, max_history=20):
-    if canvas is not None:
-        canvas_history.append(canvas.copy())
-
-    if len(canvas_history) > max_history:
-        canvas_history.pop(0)
 
 while True:
     success, frame = cap.read()
@@ -398,9 +338,6 @@ while True:
 
                 if draw_counter >= DRAW_START_DELAY:
                     if draw_counter == DRAW_START_DELAY:
-                        saveCanvasState(canvas, canvas_history)
-                        trajectory_points.clear()
-                        trajectory_points.append((x, y))
                         prev_x, prev_y = x, y
                         continue
 
@@ -418,9 +355,6 @@ while True:
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     if draw_counter == DRAW_START_DELAY:
-                        saveCanvasState(canvas, canvas_history)
-                        trajectory_points.clear()
-                        trajectory_points.append((x, y))
                         prev_x, prev_y = x, y
                         continue
 
@@ -491,23 +425,11 @@ while True:
         brush_color = (255, 255, 255) # white
 
     if key == ord("s"):
-        saveCanvasState(canvas, canvas_history)
         canvas = refineShape(canvas, trajectory_points, brush_color, brush_thickness)
         trajectory_points.clear()
         prev_x, prev_y = None, None
         points_buffer.clear()
         draw_counter = 0
-    
-    if key == ord("z"):
-        if len(canvas_history) > 0:
-            canvas = canvas_history.pop()
-            trajectory_points.clear()
-            prev_x, prev_y = None, None
-            points_buffer.clear()
-            draw_counter = 0
-            print("Undo")
-        else:
-            print("Nothing to undo")
 
     if key == ord("+") or key == ord("="):
         if isOpenHand(hand_landmarks):

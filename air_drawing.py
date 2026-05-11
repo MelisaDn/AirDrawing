@@ -2,6 +2,11 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from collections import deque
+import os
+from datetime import datetime
+
+SAVE_DIR = "air_drawing_screenshots"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 points_buffer = deque(maxlen=5)
 trajectory_points = []
@@ -524,6 +529,19 @@ while True:
         prev_x, prev_y = None, None
         points_buffer.clear()
         draw_counter = 0
+
+    if key == ord("p"):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        output_path = os.path.join(SAVE_DIR, f"air_drawing_output_{timestamp}.png")
+        canvas_path = os.path.join(SAVE_DIR, f"canvas_only_{timestamp}.png")
+
+        cv2.imwrite(output_path, output)
+        cv2.imwrite(canvas_path, canvas)
+
+        print("Saved screenshots:")
+        print(output_path)
+        print(canvas_path)
     
     if key == ord("z"):
         if len(canvas_history) > 0:

@@ -15,8 +15,8 @@ mp_draw = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
     max_num_hands=1,
     model_complexity=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_detection_confidence=0.4,
+    min_tracking_confidence=0.4
 )
 
 canvas = None
@@ -27,8 +27,9 @@ brush_color = (255, 0, 0)  # blue
 brush_thickness = 5
 eraser_thickness = 20
 lost_frames = 0
-
-LOST_FRAME_LIMIT = 5
+last_velocity = (0, 0)
+MAX_PREDICT_FRAMES = 5
+LOST_FRAME_LIMIT = 8
 DRAW_START_DELAY = 5
 
 
@@ -368,7 +369,8 @@ while True:
         break
 
     frame = cv2.flip(frame, 1)
-    frame = cv2.GaussianBlur(frame, (5, 5), 0)
+
+    # Better for MediaPipe: do NOT blur before hand tracking
     h, w, _ = frame.shape
 
     if canvas is None:
@@ -379,6 +381,7 @@ while True:
 
     if result.multi_hand_landmarks:
         lost_frames = 0
+
         for hand_landmarks in result.multi_hand_landmarks:
             mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
@@ -426,10 +429,13 @@ while True:
 
                     if prev_x is not None and prev_y is not None:
                         cv2.line(canvas, (prev_x, prev_y), (x, y),
-                                   brush_color, brush_thickness)
-                        
+                                 brush_color, brush_thickness)
+
+                        last_velocity = (x - prev_x, y - prev_y)
+
                     trajectory_points.append((x, y))
                     prev_x, prev_y = x, y
+
                 else:
                     cv2.putText(frame, "READY...", (20, 50),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
@@ -454,7 +460,28 @@ while True:
     else:
         lost_frames += 1
 
-        if lost_frames > LOST_FRAME_LIMIT:
+        # Predict short missing path when MediaPipe temporarily loses the hand
+        if (
+            lost_frames <= MAX_PREDICT_FRAMES
+            and prev_x is not None
+            and prev_y is not None
+            and draw_counter >= DRAW_START_DELAY
+        ):
+            vx, vy = last_velocity
+
+            pred_x = int(prev_x + vx)
+            pred_y = int(prev_y + vy)
+
+            pred_x = max(0, min(w - 1, pred_x))
+            pred_y = max(0, min(h - 1, pred_y))
+
+            cv2.line(canvas, (prev_x, prev_y), (pred_x, pred_y),
+                     brush_color, brush_thickness)
+
+            trajectory_points.append((pred_x, pred_y))
+            prev_x, prev_y = pred_x, pred_y
+
+        elif lost_frames > LOST_FRAME_LIMIT:
             draw_counter = 0
             prev_x, prev_y = None, None
             points_buffer.clear()

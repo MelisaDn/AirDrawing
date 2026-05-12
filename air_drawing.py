@@ -32,7 +32,12 @@ brush_color = (255, 0, 0)  # blue
 brush_thickness = 5
 eraser_thickness = 20
 lost_frames = 0
+speed_history = []
 last_velocity = (0, 0)
+show_speed_stats = False
+avg_speed_text = ""
+min_speed_text = ""
+max_speed_text = ""
 MAX_PREDICT_FRAMES = 5
 LOST_FRAME_LIMIT = 8
 DRAW_START_DELAY = 5
@@ -438,6 +443,19 @@ while True:
 
                         last_velocity = (x - prev_x, y - prev_y)
 
+                         # Hand speed (pixels/frame)
+                        speed = np.sqrt((x - prev_x)**2 + (y - prev_y)**2)
+                        speed_history.append(speed)
+
+                        # Display speed
+                        # cv2.putText(frame,
+                        #             f"Speed: {int(speed)}",
+                        #             (20, 130),
+                        #             cv2.FONT_HERSHEY_SIMPLEX,
+                        #             1,
+                        #             (255, 255, 255),
+                        #             2)
+
                     trajectory_points.append((x, y))
                     prev_x, prev_y = x, y
 
@@ -493,6 +511,31 @@ while True:
 
     output = cv2.addWeighted(frame, 0.7, canvas, 0.7, 0)
 
+    if show_speed_stats:
+
+        cv2.putText(output,
+                    avg_speed_text,
+                    (20, 130),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2)
+
+        cv2.putText(output,
+                    min_speed_text,
+                    (20, 165),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2)
+
+        cv2.putText(output,
+                    max_speed_text,
+                    (20, 200),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2)
     cv2.imshow("Air Drawing", output)
     cv2.imshow("Canvas Only", canvas)
 
@@ -507,6 +550,24 @@ while True:
         points_buffer.clear()
         trajectory_points.clear()
         draw_counter = 0
+
+    if key == ord("a"):
+
+        if len(speed_history) > 0:
+
+            avg_speed = np.mean(speed_history)
+            min_speed = np.min(speed_history)
+            max_speed = np.max(speed_history)
+
+            avg_speed_text = f"Average Speed: {avg_speed:.2f}"
+            min_speed_text = f"Min Speed: {min_speed:.2f}"
+            max_speed_text = f"Max Speed: {max_speed:.2f}"
+
+            show_speed_stats = True
+
+            speed_history.clear()
+
+
     if key == ord("b"):
         brush_color = (255, 0, 0)   # blue
 
@@ -530,7 +591,7 @@ while True:
         points_buffer.clear()
         draw_counter = 0
 
-    if key == ord("p"):
+    if key == ord("d"):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         output_path = os.path.join(SAVE_DIR, f"air_drawing_output_{timestamp}.png")

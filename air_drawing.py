@@ -380,7 +380,6 @@ while True:
 
     frame = cv2.flip(frame, 1)
 
-    # Better for MediaPipe: do NOT blur before hand tracking
     h, w, _ = frame.shape
 
     if canvas is None:

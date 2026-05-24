@@ -1,6 +1,10 @@
 # Air Drawing Application
 
-This is a cleaner multi-file version of the original single-file Air Drawing project.
+This project implements a real-time air drawing system using computer vision and hand gesture recognition. Users can draw, erase, pause, and refine geometric shapes in mid-air using only a webcam, without requiring any physical input device.
+
+The system combines MediaPipe hand tracking with classical computer vision techniques such as trajectory smoothing, tracking-loss compensation, contour analysis, Hough Transform, and shape refinement. It supports the detection and correction of circles, lines, triangles, rectangles, and squares, providing a more accurate and visually appealing drawing experience.
+
+The project was developed as part of the CS423/523 Computer Vision course.
 
 ## File structure
 
